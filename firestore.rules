@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidSecret(data) {
+      return data.keys().hasAll(['content', 'uid', 'createdAt']) &&
+             data.content is string && data.content.size() > 0 && data.content.size() < 5000 &&
+             data.uid == request.auth.uid &&
+             (data.title == null || (data.title is string && data.title.size() < 200)) &&
+             (data.type == null || data.type is string) &&
+             (data.category == null || data.category is string);
+    }
+
+    match /secrets/{secretId} {
+      allow read: if isOwner(resource.data.uid);
+      allow create: if isAuthenticated() && isValidSecret(request.resource.data);
+      allow update: if isOwner(resource.data.uid) && isValidSecret(request.resource.data);
+      allow delete: if isOwner(resource.data.uid);
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "CyberVault AI",
+  "description": "A cyberpunk-themed floating assistant for managing passwords, seeds, and keys with AI-powered categorization and voice search.",
+  "requestFramePermissions": ["microphone"]
+}

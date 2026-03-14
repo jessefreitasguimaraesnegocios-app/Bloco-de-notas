@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cyber-pink: #ff00ff;
+  --color-cyber-blue: #00ffff;
+  --color-cyber-yellow: #f0f000;
+  --color-cyber-dark: #0a0a0c;
+  
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-cyber-dark text-white font-mono overflow-hidden;
+    background-image: 
+      radial-gradient(circle at 50% 50%, rgba(0, 255, 255, 0.05) 0%, transparent 50%),
+      radial-gradient(circle at 80% 20%, rgba(255, 0, 255, 0.05) 0%, transparent 50%);
+  }
+}
+
+.glass {
+  @apply bg-black/40 backdrop-blur-xl border border-white/10;
+}
+
+.neon-border {
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.3), inset 0 0 5px rgba(0, 255, 255, 0.2);
+}
+
+.neon-text-blue {
+  text-shadow: 0 0 5px rgba(0, 255, 255, 0.5);
+}
+
+.neon-text-pink {
+  text-shadow: 0 0 5px rgba(255, 0, 255, 0.5);
+}
+
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
+
+.scanline {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: rgba(0, 255, 255, 0.1);
+  animation: scanline 4s linear infinite;
+  pointer-events: none;
+}
+

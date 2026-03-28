@@ -1,42 +1,23 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Search, 
-  Mic, 
-  Plus, 
-  X, 
-  Maximize2, 
-  Minimize2, 
-  Shield, 
-  Key, 
-  Lock, 
-  Eye, 
-  EyeOff, 
-  Trash2, 
+import {
+  Search,
+  Mic,
+  Plus,
+  Maximize2,
+  Minimize2,
+  Shield,
+  Lock,
+  Eye,
+  EyeOff,
+  Trash2,
   Cpu,
   Terminal,
   LogOut,
   User
 } from 'lucide-react';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  signOut, 
-  User as FirebaseUser 
-} from 'firebase/auth';
-import { 
-  collection, 
-  addDoc, 
-  onSnapshot, 
-  query, 
-  where, 
-  orderBy, 
-  deleteDoc, 
-  doc, 
-  Timestamp 
-} from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
+import { supabase, handleSupabaseError } from './supabase';
 import { identifySecret } from './services/gemini';
 import { cn } from './lib/utils';
 
@@ -48,11 +29,48 @@ interface Secret {
   type: 'password' | 'seed_phrase' | 'private_key' | 'api_key' | 'note';
   category: string;
   uid: string;
-  createdAt: any;
+  createdAt: string;
+}
+
+const SECRET_TYPES: Secret['type'][] = [
+  'password',
+  'seed_phrase',
+  'private_key',
+  'api_key',
+  'note'
+];
+
+function normalizeType(value: unknown): Secret['type'] {
+  const s = typeof value === 'string' ? value : '';
+  return SECRET_TYPES.includes(s as Secret['type']) ? (s as Secret['type']) : 'note';
+}
+
+function truncateTitle(label: string, max = 200): string {
+  return label.length <= max ? label : label.slice(0, max);
+}
+
+function mapRowToSecret(row: {
+  id: string;
+  title: string | null;
+  content: string;
+  type: string;
+  category: string;
+  user_id: string;
+  created_at: string;
+}): Secret {
+  return {
+    id: row.id,
+    title: row.title ?? '',
+    content: row.content,
+    type: row.type as Secret['type'],
+    category: row.category,
+    uid: row.user_id,
+    createdAt: row.created_at
+  };
 }
 
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<SupabaseUser | null>(null);
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
@@ -62,70 +80,79 @@ export default function App() {
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
   const [isListening, setIsListening] = useState(false);
 
-  // --- Auth ---
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error("Login error:", error);
-    }
+  const fetchSecrets = async (userId: string) => {
+    const { data, error } = await supabase
+      .from('secrets')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    if (error) handleSupabaseError(error, 'list', 'secrets');
+    setSecrets((data ?? []).map(mapRowToSecret));
   };
 
-  const handleLogout = () => signOut(auth);
+  // --- Auth ---
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
-  // --- Firestore ---
+  // --- Secrets (fetch + realtime) ---
   useEffect(() => {
     if (!user) {
       setSecrets([]);
       return;
     }
-
-    const q = query(
-      collection(db, 'secrets'),
-      where('uid', '==', user.uid),
-      orderBy('createdAt', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Secret[];
-      setSecrets(docs);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'secrets');
-    });
-
-    return () => unsubscribe();
+    fetchSecrets(user.id);
+    const channel = supabase
+      .channel(`secrets:${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'secrets', filter: `user_id=eq.${user.id}` },
+        () => fetchSecrets(user.id)
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [user]);
+
+  const handleLogin = async () => {
+    try {
+      const redirectTo = `${window.location.origin}${window.location.pathname || '/'}`;
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+    }
+  };
+
+  const handleLogout = () => supabase.auth.signOut();
 
   // --- Actions ---
   const handleAddSecret = async () => {
     if (!newContent.trim() || !user) return;
-
     setIsIdentifying(true);
     try {
       const identity = await identifySecret(newContent);
-      await addDoc(collection(db, 'secrets'), {
-        title: identity.label || 'New Secret',
+      const { error } = await supabase.from('secrets').insert({
+        title: truncateTitle(String(identity.label || 'New Secret')),
         content: newContent,
-        type: identity.type || 'note',
-        category: identity.category || 'unknown',
-        uid: user.uid,
-        createdAt: Timestamp.now()
+        type: normalizeType(identity.type),
+        category: String(identity.category || 'unknown').slice(0, 500),
+        user_id: user.id
       });
+      if (error) handleSupabaseError(error, 'create', 'secrets');
       setNewContent('');
       setIsAdding(false);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'secrets');
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsIdentifying(false);
     }
@@ -133,9 +160,10 @@ export default function App() {
 
   const handleDeleteSecret = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'secrets', id));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `secrets/${id}`);
+      const { error } = await supabase.from('secrets').delete().eq('id', id);
+      if (error) handleSupabaseError(error, 'delete', `secrets/${id}`);
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -147,10 +175,9 @@ export default function App() {
   const startVoiceSearch = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert("Voice recognition not supported in this browser.");
+      alert('Voice recognition not supported in this browser.');
       return;
     }
-
     const recognition = new SpeechRecognition();
     recognition.lang = 'pt-BR';
     recognition.onstart = () => setIsListening(true);
@@ -162,8 +189,7 @@ export default function App() {
     recognition.start();
   };
 
-  // --- Filtered Secrets ---
-  const filteredSecrets = secrets.filter(s => 
+  const filteredSecrets = secrets.filter(s =>
     s.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     s.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
     s.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -178,7 +204,7 @@ export default function App() {
           <Shield className="w-16 h-16 mx-auto mb-6 text-cyber-blue animate-pulse" />
           <h1 className="text-3xl font-bold mb-2 neon-text-blue uppercase tracking-widest">CyberVault AI</h1>
           <p className="text-white/60 mb-8 text-sm">SECURE NEURAL LINK REQUIRED</p>
-          <button 
+          <button
             onClick={handleLogin}
             className="w-full py-4 bg-cyber-blue text-black font-bold rounded-lg hover:bg-white transition-all flex items-center justify-center gap-2 group"
           >
@@ -192,17 +218,15 @@ export default function App() {
 
   return (
     <div className="min-h-screen p-4 flex items-start justify-center md:justify-end bg-transparent">
-      <motion.div 
+      <motion.div
         drag
         dragMomentum={false}
         className={cn(
-          "glass rounded-2xl neon-border relative flex flex-col transition-all duration-300 overflow-hidden",
-          isMinimized ? "w-16 h-16" : "w-full max-w-md h-[600px]"
+          'glass rounded-2xl neon-border relative flex flex-col transition-all duration-300 overflow-hidden',
+          isMinimized ? 'w-16 h-16' : 'w-full max-w-md h-[600px]'
         )}
       >
         <div className="scanline" />
-        
-        {/* Header */}
         <div className="p-4 border-b border-white/10 flex items-center justify-between cursor-move select-none">
           {!isMinimized && (
             <div className="flex items-center gap-2">
@@ -211,14 +235,14 @@ export default function App() {
             </div>
           )}
           <div className="flex items-center gap-1 ml-auto">
-            <button 
+            <button
               onClick={() => setIsMinimized(!isMinimized)}
               className="p-1 hover:bg-white/10 rounded transition-colors"
             >
               {isMinimized ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
             </button>
             {!isMinimized && (
-              <button 
+              <button
                 onClick={handleLogout}
                 className="p-1 hover:bg-red-500/20 text-red-400 rounded transition-colors"
               >
@@ -230,22 +254,21 @@ export default function App() {
 
         {!isMinimized && (
           <>
-            {/* Search Bar */}
             <div className="px-4 py-2">
               <div className="relative flex items-center">
                 <Search className="absolute left-3 text-white/40" size={18} />
-                <input 
+                <input
                   type="text"
                   placeholder="SEARCH NEURAL RECORDS..."
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={e => setSearchQuery(e.target.value)}
                   className="w-full bg-black/40 border border-white/10 rounded-lg py-2 pl-10 pr-10 text-sm focus:outline-none focus:border-cyber-blue/50 transition-all placeholder:text-white/20"
                 />
-                <button 
+                <button
                   onClick={startVoiceSearch}
                   className={cn(
-                    "absolute right-2 p-1.5 rounded-md transition-all",
-                    isListening ? "bg-cyber-pink text-white animate-pulse" : "hover:bg-white/10 text-white/40"
+                    'absolute right-2 p-1.5 rounded-md transition-all',
+                    isListening ? 'bg-cyber-pink text-white animate-pulse' : 'hover:bg-white/10 text-white/40'
                   )}
                 >
                   <Mic size={16} />
@@ -253,11 +276,10 @@ export default function App() {
               </div>
             </div>
 
-            {/* List */}
             <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
               <AnimatePresence mode="popLayout">
-                {filteredSecrets.map((secret) => (
-                  <motion.div 
+                {filteredSecrets.map(secret => (
+                  <motion.div
                     key={secret.id}
                     layout
                     initial={{ opacity: 0, x: -20 }}
@@ -271,20 +293,18 @@ export default function App() {
                           <span className="text-[10px] px-1.5 py-0.5 bg-cyber-blue/20 text-cyber-blue rounded uppercase font-bold tracking-widest">
                             {secret.type}
                           </span>
-                          <span className="text-[10px] text-white/40 uppercase">
-                            {secret.category}
-                          </span>
+                          <span className="text-[10px] text-white/40 uppercase">{secret.category}</span>
                         </div>
                         <h3 className="font-bold text-sm mt-1 neon-text-blue">{secret.title}</h3>
                       </div>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button 
+                        <button
                           onClick={() => toggleVisibility(secret.id)}
                           className="p-1.5 hover:bg-white/10 rounded text-white/60"
                         >
                           {visibleSecrets[secret.id] ? <EyeOff size={14} /> : <Eye size={14} />}
                         </button>
-                        <button 
+                        <button
                           onClick={() => handleDeleteSecret(secret.id)}
                           className="p-1.5 hover:bg-red-500/20 rounded text-red-400"
                         >
@@ -292,12 +312,13 @@ export default function App() {
                         </button>
                       </div>
                     </div>
-                    
                     <div className="relative">
-                      <div className={cn(
-                        "bg-black/40 p-2 rounded border border-white/5 text-xs break-all font-mono",
-                        !visibleSecrets[secret.id] && "blur-sm select-none"
-                      )}>
+                      <div
+                        className={cn(
+                          'bg-black/40 p-2 rounded border border-white/5 text-xs break-all font-mono',
+                          !visibleSecrets[secret.id] && 'blur-sm select-none'
+                        )}
+                      >
                         {secret.content}
                       </div>
                       {!visibleSecrets[secret.id] && (
@@ -309,7 +330,6 @@ export default function App() {
                   </motion.div>
                 ))}
               </AnimatePresence>
-
               {filteredSecrets.length === 0 && (
                 <div className="h-full flex flex-col items-center justify-center text-white/20 py-20">
                   <Terminal size={48} className="mb-4 opacity-20" />
@@ -318,31 +338,30 @@ export default function App() {
               )}
             </div>
 
-            {/* Add Button / Input */}
             <div className="p-4 border-t border-white/10 bg-black/20">
               <AnimatePresence mode="wait">
                 {isAdding ? (
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 20 }}
                     className="space-y-3"
                   >
-                    <textarea 
+                    <textarea
                       autoFocus
                       placeholder="PASTE SECRET CONTENT HERE..."
                       value={newContent}
-                      onChange={(e) => setNewContent(e.target.value)}
+                      onChange={e => setNewContent(e.target.value)}
                       className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-xs focus:outline-none focus:border-cyber-pink/50 h-24 resize-none"
                     />
                     <div className="flex gap-2">
-                      <button 
+                      <button
                         onClick={() => setIsAdding(false)}
                         className="flex-1 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold transition-all"
                       >
                         ABORT
                       </button>
-                      <button 
+                      <button
                         disabled={!newContent.trim() || isIdentifying}
                         onClick={handleAddSecret}
                         className="flex-[2] py-2 bg-cyber-pink text-white rounded-lg text-xs font-bold hover:bg-white hover:text-black transition-all disabled:opacity-50 flex items-center justify-center gap-2"
@@ -362,7 +381,7 @@ export default function App() {
                     </div>
                   </motion.div>
                 ) : (
-                  <motion.button 
+                  <motion.button
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
@@ -380,19 +399,10 @@ export default function App() {
       </motion.div>
 
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(0, 255, 255, 0.1);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(0, 255, 255, 0.3);
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(0, 255, 255, 0.1); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0, 255, 255, 0.3); }
       `}</style>
     </div>
   );

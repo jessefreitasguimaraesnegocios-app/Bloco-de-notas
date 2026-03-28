@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Firebase (projeto migrado para Supabase; não versionar chaves)
+firebase-applet-config.json
+firebase-blueprint.json
+
+supabase/.temp/

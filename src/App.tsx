@@ -14,7 +14,8 @@ import {
   Cpu,
   Terminal,
   LogOut,
-  User
+  User,
+  Download
 } from 'lucide-react';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase, handleSupabaseError } from './supabase';
@@ -49,6 +50,19 @@ function truncateTitle(label: string, max = 200): string {
   return label.length <= max ? label : label.slice(0, max);
 }
 
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: string }>;
+};
+
+function isRunningAsInstalledPWA(): boolean {
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    window.matchMedia('(display-mode: window-controls-overlay)').matches ||
+    (window.navigator as Navigator & { standalone?: boolean }).standalone === true
+  );
+}
+
 function mapRowToSecret(row: {
   id: string;
   title: string | null;
@@ -79,6 +93,23 @@ export default function App() {
   const [isIdentifying, setIsIdentifying] = useState(false);
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({});
   const [isListening, setIsListening] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    if (isRunningAsInstalledPWA()) return;
+    const onBeforeInstall = (e: Event) => {
+      e.preventDefault();
+      setInstallPrompt(e as InstallPromptEvent);
+    };
+    window.addEventListener('beforeinstallprompt', onBeforeInstall);
+    return () => window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+  }, []);
+
+  const handleInstallPWA = async () => {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    setInstallPrompt(null);
+  };
 
   const fetchSecrets = async (userId: string) => {
     const { data, error } = await supabase
@@ -211,6 +242,16 @@ export default function App() {
             <User className="w-5 h-5 group-hover:rotate-12 transition-transform" />
             INITIALIZE AUTHENTICATION
           </button>
+          {installPrompt && (
+            <button
+              type="button"
+              onClick={handleInstallPWA}
+              className="mt-4 w-full py-3 border border-cyber-blue/40 text-cyber-blue text-xs font-bold rounded-lg hover:bg-cyber-blue/10 flex items-center justify-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              INSTALAR COMO APP (PWA)
+            </button>
+          )}
         </div>
       </div>
     );
@@ -241,6 +282,16 @@ export default function App() {
             >
               {isMinimized ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
             </button>
+            {!isMinimized && installPrompt && (
+              <button
+                type="button"
+                onClick={handleInstallPWA}
+                title="Instalar como app"
+                className="p-1 hover:bg-cyber-blue/20 text-cyber-blue rounded transition-colors"
+              >
+                <Download size={16} />
+              </button>
+            )}
             {!isMinimized && (
               <button
                 onClick={handleLogout}
